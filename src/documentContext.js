@@ -21,6 +21,8 @@ function DocumentContext(pageSize, pageMargins) {
 
 	this.endingCell = null;
 
+	this.currentNodeBackground = [];
+
 	this.tracker = new TraversalTracker();
 
 	this.backgroundLength = [];

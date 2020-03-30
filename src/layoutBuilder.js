@@ -154,6 +154,12 @@ LayoutBuilder.prototype.tryLayoutDocument = function (docStructure, fontProvider
 	var _this = this;
 	this.writer.context().tracker.startTracking('pageAdded', function () {
 		_this.addBackground(background);
+	}); 
+	this.writer.tracker.startTracking('beforePageChanged', function () {
+		var context = _this.writer.context();
+		for (var i = context.currentNodeBackground.length - 1, b; b = context.currentNodeBackground[i]; i--){
+			_this.addNodeBackground(b.node, {index: i, background: b}, true);
+		}
 	});
 
 	this.addBackground(background);
@@ -364,11 +370,74 @@ function decorateNode(node) {
 		}
 	};
 }
+ 
+LayoutBuilder.prototype.getCurrentBackground = function(node) {
+	var context = this.writer.context();
+	for (var i = 0, b; b = context.currentNodeBackground[i]; i++) {
+		if (b.node == node) return {index: i, background: b};
+	}
+}
 
-LayoutBuilder.prototype.processNode = function (node) {
+LayoutBuilder.prototype.saveCurrentBackground = function(node) {
+	var context = this.writer.context();
+	var position = context.getCurrentPosition();
+	context.currentNodeBackground.push({
+		stackPosition: context.pages[context.page].items.length,
+		origPosition: {left: position.left + (node.margin? node.margin[0]: 0), top: position.top + (node.margin? node.margin[1]: 0)},
+		linearNodeListPosition: this.linearNodeList.length,
+		node: node
+	});
+};
+
+LayoutBuilder.prototype.resetBackgroundPage = function(context, currentNodeBackground) {
+	currentNodeBackground.origPosition.top = context.pageMargins.top || 0;
+	currentNodeBackground.stackPosition = (context.backgroundLength.length? context.backgroundLength[context.backgroundLength.length-1]: 0);
+	currentNodeBackground.linearNodeListPosition = this.linearNodeList.length;
+}
+
+LayoutBuilder.prototype.addNodeBackground = function(node, currentNodeBackground, pageComplete) {
+	var index = currentNodeBackground.index;
+	currentNodeBackground = currentNodeBackground.background;
+	var backgroundGetter = isFunction(node.custombackground) ? node.custombackground : function () {
+		return node.custombackground;
+	};
+	var context = this.writer.context();
+	var position = context.getCurrentPosition();
+	var lastItemPos, snapshot;
+	if (pageComplete) {
+		snapshot = context.pageSnapshot();
+		var page = context.getCurrentPage();
+		var lastItem = page.items[page.items.length - 1].item;
+		lastItemPos = (lastItem.y2 || page.pageSize.height - context.pageMargins.bottom- context.availableHeight);
+		if (!currentNodeBackground.node.positions.length || currentNodeBackground.node.positions[currentNodeBackground.node.positions.length - 1].top == currentNodeBackground.origPosition.top)
+			return;
+	}
+	var height = (lastItemPos || position.top) - currentNodeBackground.origPosition.top;
+	var resetted;
+	if (height < 0 ) {
+		this.resetBackgroundPage(context, currentNodeBackground);
+		height = (lastItemPos || position.top) - currentNodeBackground.origPosition.top;
+		resetted = true;
+	}
+	var width = node.width || (node._maxWidth < (snapshot || context).availableWidth && !node.columns? node._maxWidth: (snapshot || context).availableWidth);
+	var pageBackground = backgroundGetter(width, node.height || height);
+	if (pageBackground) {
+		context.beginDetachedBlock();
+		context.moveTo(currentNodeBackground.origPosition.left, currentNodeBackground.origPosition.top);
+		pageBackground = this.docPreprocessor.preprocessDocument(pageBackground);
+		this.processNode(this.docMeasure.measureDocument(pageBackground), currentNodeBackground.stackPosition , currentNodeBackground.linearNodeListPosition);
+		context.endDetachedBlock();
+		if (!pageComplete) {
+			context.currentNodeBackground.splice(index, 1);
+		}
+		else if (!resetted) this.resetBackgroundPage(context, currentNodeBackground);
+	}
+}
+
+LayoutBuilder.prototype.processNode = function (node, index, lnindex) {
 	var self = this;
-
-	this.linearNodeList.push(node);
+	node.custombackground && this.saveCurrentBackground(node);
+	if (lnindex != null) this.linearNodeList.splice(lnindex, 0, node); else this.linearNodeList.push(node);
 	decorateNode(node);
 
 	applyMargins(function () {
@@ -408,7 +477,7 @@ LayoutBuilder.prototype.processNode = function (node) {
 		} else if (node.svg) {
 			self.processSVG(node);
 		} else if (node.canvas) {
-			self.processCanvas(node);
+			self.processCanvas(node, index);
 		} else if (node.qr) {
 			self.processQr(node);
 		} else if (!node._span) {
@@ -421,7 +490,9 @@ LayoutBuilder.prototype.processNode = function (node) {
 
 		if (unbreakable) {
 			self.writer.commitUnbreakableBlock();
-		}
+		} 
+		var nodeBackground = self.getCurrentBackground(node);
+		nodeBackground && self.addNodeBackground(node, nodeBackground);
 	});
 
 	function applyMargins(callback) {
@@ -779,10 +850,10 @@ LayoutBuilder.prototype.processSVG = function (node) {
 	node.positions.push(position);
 };
 
-LayoutBuilder.prototype.processCanvas = function (node) {
+LayoutBuilder.prototype.processCanvas = function (node, index) {
 	var height = node._minHeight;
 
-	if (node.absolutePosition === undefined && this.writer.context().availableHeight < height) {
+	if (node.absolutePosition === undefined && this.writer.context().availableHeight < height && index === undefined) {
 		// TODO: support for canvas larger than a page
 		// TODO: support for other overflow methods
 
@@ -792,7 +863,7 @@ LayoutBuilder.prototype.processCanvas = function (node) {
 	this.writer.alignCanvas(node);
 
 	node.canvas.forEach(function (vector) {
-		var position = this.writer.addVector(vector);
+		var position = this.writer.addVector(vector, false, false, index);
 		node.positions.push(position);
 	}, this);
 
