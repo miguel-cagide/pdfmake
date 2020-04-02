@@ -157,8 +157,8 @@ LayoutBuilder.prototype.tryLayoutDocument = function (docStructure, fontProvider
 	}); 
 	this.writer.tracker.startTracking('beforePageChanged', function () {
 		var context = _this.writer.context();
-		for (var i = context.currentNodeBackground.length - 1, b; b = context.currentNodeBackground[i]; i--){
-			_this.addNodeBackground(b.node, {index: i, background: b}, true);
+		for (var i = context.currentNodeBackground.length - 1, n; n = context.currentNodeBackground[i]; i--){
+			_this.addNodeBackground(n, i);
 		}
 	});
 
@@ -370,67 +370,88 @@ function decorateNode(node) {
 		}
 	};
 }
- 
-LayoutBuilder.prototype.getCurrentBackground = function(node) {
-	var context = this.writer.context();
-	for (var i = 0, b; b = context.currentNodeBackground[i]; i++) {
-		if (b.node == node) return {index: i, background: b};
-	}
-}
 
 LayoutBuilder.prototype.saveCurrentBackground = function(node) {
 	var context = this.writer.context();
 	var position = context.getCurrentPosition();
-	context.currentNodeBackground.push({
+	node.bg = {
 		stackPosition: context.pages[context.page].items.length,
 		origPosition: {left: position.left + (node.margin? node.margin[0]: 0), top: position.top + (node.margin? node.margin[1]: 0)},
 		linearNodeListPosition: this.linearNodeList.length,
-		node: node
-	});
+		pages: {}
+	};
+	context.currentNodeBackground.push(node);
 };
 
-LayoutBuilder.prototype.resetBackgroundPage = function(context, currentNodeBackground) {
-	currentNodeBackground.origPosition.top = context.pageMargins.top || 0;
-	currentNodeBackground.stackPosition = (context.backgroundLength.length? context.backgroundLength[context.backgroundLength.length-1]: 0);
-	currentNodeBackground.linearNodeListPosition = this.linearNodeList.length;
+LayoutBuilder.prototype.resetBackgroundPage = function(context, node) {
+	node.bg.origPosition.top = context.pageMargins.top || 0;
+	node.bg.stackPosition = (context.backgroundLength.length? context.backgroundLength[context.backgroundLength.length-1]: 0);
+	node.bg.linearNodeListPosition = this.linearNodeList.length;
 }
-
-LayoutBuilder.prototype.addNodeBackground = function(node, currentNodeBackground, pageComplete) {
-	var index = currentNodeBackground.index;
-	currentNodeBackground = currentNodeBackground.background;
+LayoutBuilder.prototype.outsidePage = function(positions) {
+	if (positions && positions.length) {
+		var currentPage = this.writer.context().page;
+		for (var i = 0, p; p = positions[i]; i++) {
+			if (p.pageNumber - 1 == currentPage) {
+				return p.top > p.pageInnerHeight;
+			}
+		}
+	}
+	return true;
+}
+LayoutBuilder.prototype.notInPage = function(node) {
+	var layout = node.stack || node.columns;
+	if (layout) {
+		for (var i = 0, n; n = layout[i]; i++) {
+			if (!this.notInPage(n)) return false;
+		}
+		return true;
+	} else
+		return this.outsidePage(node.positions);
+}
+LayoutBuilder.prototype.addNodeBackground = function(node, index) {
+	var context = this.writer.context();
+	var pageComplete = index != null;
 	var backgroundGetter = isFunction(node.custombackground) ? node.custombackground : function () {
 		return node.custombackground;
 	};
-	var context = this.writer.context();
 	var position = context.getCurrentPosition();
-	var lastItemPos, snapshot;
+	var lastItemPos, snapshot, top;
 	if (pageComplete) {
 		snapshot = context.pageSnapshot();
 		var page = context.getCurrentPage();
 		var lastItem = page.items[page.items.length - 1].item;
-		lastItemPos = (lastItem.y2 || page.pageSize.height - context.pageMargins.bottom- context.availableHeight);
-		if (!currentNodeBackground.node.positions.length || currentNodeBackground.node.positions[currentNodeBackground.node.positions.length - 1].top == currentNodeBackground.origPosition.top)
+		lastItemPos = (lastItem.y2 || page.pageSize.height - context.pageMargins.bottom - context.availableHeight);
+		if (this.notInPage(node)) {
+			this.resetBackgroundPage(context, node);
 			return;
+		}
+	} 
+	if (node.bg.pages[context.page] != null) top = node.bg.pages[context.page];
+	else {
+		top = node.bg.origPosition.top;
+		node.bg.pages[context.page] = top;
 	}
-	var height = (lastItemPos || position.top) - currentNodeBackground.origPosition.top;
+	index = index || context.currentNodeBackground.indexOf(node);
+	var height = (lastItemPos || position.top) - top;
 	var resetted;
 	if (height < 0 ) {
-		this.resetBackgroundPage(context, currentNodeBackground);
-		height = (lastItemPos || position.top) - currentNodeBackground.origPosition.top;
+		this.resetBackgroundPage(context, node);
+		height = (lastItemPos || position.top) - top;
 		resetted = true;
 	}
 	var width = node.width || (node._maxWidth < (snapshot || context).availableWidth && !node.columns? node._maxWidth: (snapshot || context).availableWidth);
 	var pageBackground = backgroundGetter(width, node.height || height);
 	if (pageBackground) {
 		context.beginDetachedBlock();
-		context.moveTo(currentNodeBackground.origPosition.left, currentNodeBackground.origPosition.top);
+		context.moveTo(node.bg.origPosition.left, top);
 		pageBackground = this.docPreprocessor.preprocessDocument(pageBackground);
-		this.processNode(this.docMeasure.measureDocument(pageBackground), currentNodeBackground.stackPosition , currentNodeBackground.linearNodeListPosition);
+		this.processNode(this.docMeasure.measureDocument(pageBackground), node.bg.stackPosition , node.bg.linearNodeListPosition);
 		context.endDetachedBlock();
 		if (!pageComplete) {
 			context.currentNodeBackground.splice(index, 1);
 		}
-		else if (!resetted) this.resetBackgroundPage(context, currentNodeBackground);
+		else if (!resetted) this.resetBackgroundPage(context, node);
 	}
 }
 
@@ -491,8 +512,7 @@ LayoutBuilder.prototype.processNode = function (node, index, lnindex) {
 		if (unbreakable) {
 			self.writer.commitUnbreakableBlock();
 		} 
-		var nodeBackground = self.getCurrentBackground(node);
-		nodeBackground && self.addNodeBackground(node, nodeBackground);
+		node.bg && self.addNodeBackground(node);
 	});
 
 	function applyMargins(callback) {
